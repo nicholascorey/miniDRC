@@ -1,86 +1,90 @@
-#include "audio_proc.h"
 #include "wm8731_io.h"
+#include "audio_proc.h"
 
-
-scalar_t db_pow_table_frac[1001];
-scalar_t db_pow_table_base[20];
-
-void audio_proc_init() {
-  for(int i=0; i<1001; i++) {
-    db_pow_table_frac[i] = pow(10, scalar_t(i)/1000.0);
-  }
-  for(int i=0; i<20; i++) {
-    db_pow_table_base[i] = pow(10, i-10);
-  }
-}
-
-
-scalar_t get_db_pow_frac(scalar_t db) {
-  db = db - floor(db/10.0)*10.0;
-  scalar_t frac_i = db*100.0;
-  int index = floor(frac_i);
-  scalar_t frac = frac_i - scalar_t(index);
-  return (db_pow_table_frac[index]*(1.0-frac)) + (db_pow_table_frac[index+1]*frac);
-}
-
-scalar_t get_db_pow(scalar_t db) {
-  return db_pow_table_base[int(floor(db/10.0))+10] * get_db_pow_frac(db);
-}
-
-
-stereo_sample_t scale_sample(stereo_sample_t input, scalar_t scale) {
-  stereo_sample_t out;
-  out.left = input.left * scale;
-  out.right = input.right * scale;
-  return out;
-}
-
-
-
-#define RMS_BUF_SIZE 128
 #define RMS_VOLT_MULTIPLY 3.054393305
 #define LINE_REF_RMS_VOLT 1.228
 #define LINE_REF_DBU 4.0
 #define OUTPUT_SCALE 2.274143302
 
-#define ATTACK 100   // dB/ds
+#define ATTACK 50   // dB/ds
 #define RELEASE 5  // dB/ds
 #define THRESHOLD -35
 #define RATIO 4
-#define MAKEUP 0
+#define MAKEUP 10
 #define SAMPLE_RATE 48000
+#define ADVANCE_LOOKUP_SECONDS 0.01
 
-#define GAIN_ADJUSTMENT_INTERVAL 100   // in audio samples
+#define RMS_BUF_SIZE 256
+#define GAIN_ADJUSTMENT_INTERVAL 10   // in audio samples
 
-scalar_t cur_gain = -100;
-scalar_t new_gain = 0;
+scalr_t cur_gain = -100;
+scalr_t new_gain = 0;
 
-const scalar_t release_amount = 1.0 / SAMPLE_RATE * RELEASE * 10.0 * GAIN_ADJUSTMENT_INTERVAL;
-const scalar_t attack_amount = 1.0 / SAMPLE_RATE * ATTACK * 10.0 * GAIN_ADJUSTMENT_INTERVAL;
+const scalr_t release_amount = 1.0 / SAMPLE_RATE * RELEASE * 10.0 * GAIN_ADJUSTMENT_INTERVAL;
+const scalr_t attack_amount = 1.0 / SAMPLE_RATE * ATTACK * 10.0 * GAIN_ADJUSTMENT_INTERVAL;
 
 void setup() {
   Serial.begin(115200, SERIAL_8N1);
-  Serial.printf("\n\nInitializing...\n");
-  Serial.printf("audio proc...");
-  audio_proc_init();
-  Serial.printf("done\n");
-  Serial.printf("codec...");
+  Serial.println("\n");
+
   ws8731_init();
-  Serial.printf("done\n");
-  Serial.println("Init completed");
+
+  ////////////////////////////////////////////////////////////////
+  /*  This section of code stands as a testament to hours of
+   *  debugging, lots of dead-ends, tons of research, and the
+   *  broken-ass state of this this processor's I2S hardware
+   *  and/or drivers. All I can guess is that the I2S hardware
+   *  requires CPU usage of sufficient time AND complexity to
+   *  after initialization to properly sync with the source. If
+   *  it doesn't sync, the input audio sounds crackly.  A delay()
+   *  doesn't work, putting this section of code at the end of
+   *  the init function doesn't work, changing the init timing
+   *  doesn't work.
+   *  
+   *  Stand ye at the foot of this shrine and tremble in awe of
+   *  this wretched kludge.
+   */
+  for(int i=0; i<10000; i++) {
+    sqrt(i);
+  }
+  ////////////////////////////////////////////////////////////////
+
+//  Serial.println("Testing");
+//  stereo_sample_t sample;
+//  for(int i=0; i<50000; i++) {
+//    sample = wm8731_read();
+//    wm8731_write(scale_sample(sample, 0.003));
+//  }
+//  Serial.println("Done");
+
+  Serial.println("Initialized");
 }
 
+bool first_run = true;
+
 void loop() {
+  static int serial_count;
+  static int delay_samples;
+
+  if(first_run) {
+    first_run = false;
+    init_audio_proc();
+    serial_count = 0;
+    delay_samples = int(ADVANCE_LOOKUP_SECONDS * SAMPLE_RATE);
+  }
+
   stereo_sample_t sample;
+  stereo_sample_t delay_sample;
   stereo_sample_t out_sample;
   stereo_sample_t rms;
-  scalar_t drc_scale;
+  scalr_t drc_scale;
   
   rms.left = 0;
   rms.right = 0;
 
   for(int i=0; i<RMS_BUF_SIZE; i++) {
     sample = wm8731_read();
+    delay_sample = process_delay(sample, delay_samples);
 
     if(i%GAIN_ADJUSTMENT_INTERVAL==0) {
       bool lowered = false;
@@ -98,7 +102,7 @@ void loop() {
       drc_scale = get_db_pow(cur_gain / 2.0) * OUTPUT_SCALE;
     }
 
-    wm8731_write(scale_sample(sample, drc_scale));
+    wm8731_write(scale_sample(delay_sample, drc_scale));
 
     rms.left += sample.left * sample.left;
     rms.right += sample.right * sample.right;
@@ -109,8 +113,11 @@ void loop() {
   rms.right = 20 * log10(rms.right / 0.775);
 
   new_gain = max(rms.left, rms.right) - THRESHOLD;        // find amplitude over threshold
-  new_gain = max(new_gain, scalar_t(0.0)) / RATIO * (RATIO - 1.0);  // find amplitude to reduce signal by
+  new_gain = max(new_gain, scalr_t(0.0)) / RATIO * (RATIO - 1.0);  // find amplitude to reduce signal by
   new_gain = -new_gain + MAKEUP;                                     // apply makeup gain
 
-//  Serial.printf("%.5f, %.5f\n", new_gain, cur_gain);
+  serial_count = (serial_count + 1) % 2;
+  if(serial_count == 0) {
+    Serial.printf("%.5f, %.5f\n", new_gain, cur_gain);
+  }
 }

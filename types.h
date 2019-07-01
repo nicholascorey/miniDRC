@@ -2,7 +2,7 @@
 #ifndef TYPES_H_INCLUDED
 #define TYPES_H_INCLUDED
 
-typedef float scalar_t;
+typedef float scalr_t;
 
 
 typedef float mono_sample_t;

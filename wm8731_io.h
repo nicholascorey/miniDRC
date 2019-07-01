@@ -1,7 +1,8 @@
-#include "types.h"
 #include "wm8731_config.h"
 #include "driver/i2s.h"
+#include "types.h"
 
+#define MAX_CODEC_SAMPLE LONG_MAX
 #define I2S_BCK_PIN 25
 #define I2S_WS_PIN 26
 #define I2S_OUT_PIN 32
@@ -30,9 +31,7 @@ void ws8731_init() {
     .data_in_num          = I2S_IN_PIN
   };
 
-  Serial.println("1");
   i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  Serial.println("2");
   i2s_config.mode                 = (i2s_mode_t)(I2S_MODE_SLAVE | I2S_MODE_TX);
   i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
 
